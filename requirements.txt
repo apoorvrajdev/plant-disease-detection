@@ -1,0 +1,30 @@
+# Pinned to match the original training run.
+# TF 2.12 forces numpy<1.24; do not bump without re-validating the notebook.
+tensorflow==2.12.0
+numpy<1.24
+
+# Dataset download from Kaggle
+opendatasets>=0.1.22
+kaggle>=1.5.13
+
+# Notebook + plotting
+matplotlib>=3.5
+pillow>=10.0
+ipykernel>=6.0
+jupyter>=1.0
+
+# Web app (Gradio UI for the Hugging Face Space) and HF Hub client (deploy script).
+# huggingface_hub upper-bounded at <1.0 because Gradio 4.44.0 still imports
+# HfFolder, which was removed in huggingface_hub 1.0.0.
+# Starlette/FastAPI upper-bounded because Starlette 0.40 changed
+# TemplateResponse to request-first; Gradio 4.44.x still calls the old
+# (name, context) signature, which collapses Jinja2's cache key into a dict.
+gradio>=4.0,<5.0
+huggingface_hub>=0.20,<1.0
+starlette>=0.36,<0.40
+fastapi>=0.110,<0.115
+
+# Optional but useful for evaluation work the agent may do later:
+# scikit-learn>=1.2
+# pandas>=1.5
+# seaborn>=0.12
