@@ -14,9 +14,17 @@ from typing import Optional
 
 import numpy as np
 import tensorflow as tf
-from PIL import Image
+from PIL import Image, ImageOps
 
 from .model_utils import ensure_model_present
+
+# Upper bound on the longest edge we let through before resizing to 224×224.
+# Prevents a multi-hundred-MB float32 allocation on accidental (or hostile)
+# huge uploads. 2048 is well above any realistic phone photo's useful detail
+# at 224×224 and keeps the float32 intermediate under ~50 MB.
+_MAX_INPUT_EDGE = 2048
+_INPUT_SIZE = (224, 224)
+_NUM_CLASSES = 38
 
 _PKG = Path(__file__).resolve().parent
 _REPO_ROOT = _PKG.parent
@@ -45,11 +53,19 @@ def load_model() -> tuple[tf.keras.Model, list[str]]:
                 "Run export_model.py first to generate it."
             )
         class_names = json.loads(CLASS_NAMES_PATH.read_text(encoding="utf-8"))
-        if len(class_names) != 38:
+        if len(class_names) != _NUM_CLASSES:
             raise ValueError(
-                f"Expected 38 class names in {CLASS_NAMES_PATH}, got {len(class_names)}."
+                f"Expected {_NUM_CLASSES} class names in {CLASS_NAMES_PATH}, "
+                f"got {len(class_names)}."
             )
         model = tf.keras.models.load_model(str(MODEL_PATH))
+        out_dim = int(model.output_shape[-1])
+        if out_dim != _NUM_CLASSES:
+            raise ValueError(
+                f"Loaded model at {MODEL_PATH} has output dim {out_dim}, "
+                f"expected {_NUM_CLASSES}. The class_names.json and the model "
+                f"weights are out of sync — re-run export_model.py."
+            )
         _MODEL_CACHE = (model, class_names)
         return _MODEL_CACHE
 
@@ -103,12 +119,29 @@ def predict(pil_image: Image.Image) -> dict:
           "raw_label": "Tomato___Early_blight"  # untouched dataset label
         }
     """
+    if not isinstance(pil_image, Image.Image):
+        raise TypeError(
+            f"predict() expects a PIL.Image.Image, got {type(pil_image).__name__}."
+        )
+
     model, class_names = load_model()
 
-    arr = np.asarray(pil_image.convert("RGB"), dtype=np.float32)
-    img = tf.image.resize(arr, (224, 224))
-    img = tf.expand_dims(img, axis=0)
-    probs = np.asarray(model.predict(img, verbose=0)[0], dtype=np.float64)
+    # 1) Honour EXIF orientation. Phone uploads frequently carry an orientation
+    #    tag rather than physically rotated pixels; without this the model sees
+    #    sideways/upside-down leaves and silently regresses on field photos.
+    # 2) Bound the working size *before* the float32 cast to keep memory
+    #    deterministic on oversized inputs.
+    img = ImageOps.exif_transpose(pil_image).convert("RGB")
+    if max(img.size) > _MAX_INPUT_EDGE:
+        img.thumbnail((_MAX_INPUT_EDGE, _MAX_INPUT_EDGE), Image.BILINEAR)
+
+    arr = np.asarray(img, dtype=np.float32)
+    tensor = tf.image.resize(arr, _INPUT_SIZE)
+    tensor = tf.expand_dims(tensor, axis=0)
+    # model(...) is the low-latency single-image path; model.predict() adds
+    # callback / dispatch overhead that dominates the per-request cost at
+    # batch size 1.
+    probs = np.asarray(model(tensor, training=False)[0], dtype=np.float64)
 
     top3_idx = np.argsort(probs)[-3:][::-1]
     top1 = int(top3_idx[0])
