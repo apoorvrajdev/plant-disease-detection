@@ -29,10 +29,10 @@ The repo ships everything needed to reproduce the model and serve it: the **trai
 
 - **38-class multi-disease classifier** across 14 crops (Apple, Tomato, Grape, Corn, Potato, Pepper, Strawberry, Cherry, Peach, Soybean, Squash, Raspberry, Blueberry, Orange).
 - **Transfer learning with EfficientNetB0** — ImageNet-pretrained backbone, last 20 layers fine-tuned.
-- **Production-quality inference module** — thread-safe lazy loading, structured prediction output (top-1 + top-3 + healthy flag + raw label).
+- **Production-quality inference module** — thread-safe lazy loading, EXIF-aware preprocessing, bounded-memory image handling, and structured prediction output (top-1 + top-3 + healthy flag + raw label).
 - **Interactive Gradio UI** with bundled example leaves and a top-3 confidence breakdown.
 - **Clean separation of concerns** — training notebook, export script, and runtime app are decoupled.
-- **Cold-boot weight downloading** — large model artifacts live in a GitHub Release rather than the repo, keeping clones fast.
+- **Hardened cold-boot weight download** — large model artifacts live in a GitHub Release rather than the repo, fetched with timeout, retry/backoff, size sanity check, and optional `MODEL_SHA256` integrity verification.
 - **Defensive Gradio shimming** for known upstream JSON-schema bugs in `gradio_client` 4.44.x.
 - **Reproducible setup** — pinned `requirements.txt` and a `.env.example` for Kaggle credentials.
 
@@ -244,6 +244,41 @@ The dataset is **not committed** to this repo (see [`.gitignore`](.gitignore)).
 ├── docs/                                # README screenshots (sample predictions)
 └── New Plant Diseases Dataset/          # gitignored — Kaggle data
 ```
+
+---
+
+## Production Hardening (2026-05-26 audit)
+
+A focused ML systems audit was performed on the inference and deployment layers. The pipeline (train/inference transform parity, class ordering, lazy-loading correctness) validated cleanly; the changes below address real defects in inference robustness and cold-boot reliability rather than cosmetic refactors.
+
+### Inference (`app/predict.py`)
+
+- **EXIF orientation is now honoured** via `PIL.ImageOps.exif_transpose` before RGB conversion. Phone uploads frequently store landscape pixels plus an orientation tag; without this fix the model received rotated leaves and silently regressed on real field photos.
+- **Single-image latency path** switched from `model.predict(x, verbose=0)` to `model(x, training=False)`. Eliminates per-request Keras dispatch/callback overhead — the supported low-latency path at batch size 1.
+- **Input-type guard** — `predict()` now raises a clear `TypeError` on non-PIL inputs instead of failing deep inside `.convert()`.
+- **Bounded memory on oversized uploads** — images with a longest edge above 2048 px are downscaled with `PIL.Image.thumbnail` *before* the `float32` cast, capping the intermediate allocation regardless of upload size.
+- **Model/labels desync detection** — `load_model()` now asserts `model.output_shape[-1] == 38` in addition to the existing class-count check, so a mis-uploaded release asset fails loudly instead of silently corrupting every prediction.
+
+### Weight download (`app/model_utils.py`)
+
+- **Connect timeout** of 30 s — cold start no longer hangs indefinitely on a stalled CDN.
+- **Retry with exponential backoff** (3 attempts) for transient network failures.
+- **Explicit `User-Agent`** — avoids redirect/CDN rejections of the default `Python-urllib/x.y` UA.
+- **Minimum-size sanity check** (1 MB floor) — an HTML error page masquerading as the asset is rejected with a useful message instead of being handed to the Keras loader.
+- **Optional `MODEL_SHA256` env var** — when set, the downloaded `.keras` is SHA-256 verified and deleted on mismatch. Defence-in-depth against tampered/corrupted weights, since `.keras` files can execute arbitrary code via Lambda layers.
+
+### Environment variables
+
+| Variable            | Purpose                                                                 |
+| ------------------- | ----------------------------------------------------------------------- |
+| `MODEL_RELEASE_URL` | Override the default GitHub Release URL for `plant_disease_model.keras`.|
+| `MODEL_SHA256`      | Optional hex SHA-256 of the model asset. Strongly recommended in prod.  |
+
+### Validated (no change required)
+
+- Train/inference transform parity — both paths use bilinear resize to 224×224 on RGB at `[0, 255]`; EfficientNetB0's built-in `Rescaling` + `Normalization` layers (visible in the notebook's `model.summary`) make raw uint8 the correct input contract. No `preprocess_input` call is needed.
+- Class ordering — alphabetical `tf.data` directory listing matches `sorted(...)` in `export_model.py` and the committed `app/class_names.json`.
+- Thread-safe lazy model loading — double-checked locking around `_MODEL_CACHE` is correct under the GIL.
 
 ---
 
