@@ -21,7 +21,7 @@ Plant Disease Detection is an end-to-end deep-learning pipeline that classifies 
 
 The repo ships everything needed to reproduce the model and serve it: the **training notebook**, an **inference package**, an **export script**, and a **Gradio web app** that is deployed live on Hugging Face Spaces.
 
-> 
+> **Try it now without installing anything:** [https://huggingface.co/spaces/workface/plant-disease-detection](https://huggingface.co/spaces/workface/plant-disease-detection)
 
 ---
 
